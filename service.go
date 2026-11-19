@@ -1,84 +1,163 @@
 package main
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
+
+const (
+	workerCount   = 2
+	queueCapacity = 4
+)
 
 var (
 	ErrTaskNotFound     = errors.New("task not found")
 	ErrInvalidTaskState = errors.New("task must be pending")
+	ErrStopped          = errors.New("task service has stopped")
 )
 
+// Processor implementations may be called by both workers at the same time.
 type Processor interface {
 	Process(text string) (AnalysisResult, error)
 }
 
+type job struct {
+	id   int
+	done chan error // Set only for callers of the synchronous Process method.
+}
+
 type TaskService struct {
+	mu        sync.RWMutex
 	tasks     map[int]Task
 	nextID    int
 	processor Processor
+	queue     chan job
+	space     *sync.Cond
+	stopped   bool
+	workers   sync.WaitGroup
 }
 
 func NewTaskService(processor Processor) *TaskService {
-	return &TaskService{
+	s := &TaskService{
 		tasks:     make(map[int]Task),
 		nextID:    1,
 		processor: processor,
+		queue:     make(chan job, queueCapacity),
 	}
+	s.space = sync.NewCond(&s.mu)
+	for range workerCount {
+		s.workers.Go(s.work)
+	}
+	return s
 }
 
 func (s *TaskService) Create(text string) (Task, error) {
 	if err := validateText(text); err != nil {
 		return Task{}, err
 	}
-
-	task := Task{
-		ID:     s.nextID,
-		Input:  text,
-		Status: StatusPending,
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return Task{}, ErrStopped
 	}
-
+	task := Task{ID: s.nextID, Input: text, Status: StatusPending}
 	s.tasks[task.ID] = task
 	s.nextID++
-
 	return task, nil
 }
 
 func (s *TaskService) Get(id int) (Task, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	task, ok := s.tasks[id]
 	if !ok {
 		return Task{}, ErrTaskNotFound
 	}
-
 	if task.Result != nil {
 		resultCopy := *task.Result
 		task.Result = &resultCopy
 	}
-
 	return task, nil
 }
 
+// Submit waits only for a queue slot. Workers analyze accepted tasks independently.
+func (s *TaskService) Submit(id int) error {
+	return s.enqueue(job{id: id})
+}
+
+func (s *TaskService) enqueue(j job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if s.stopped {
+			return ErrStopped
+		}
+		task, ok := s.tasks[j.id]
+		if !ok {
+			return ErrTaskNotFound
+		}
+		if task.Status != StatusPending {
+			return ErrInvalidTaskState
+		}
+		select {
+		case s.queue <- j:
+			task.Status = StatusQueued
+			task.LastError = ""
+			s.tasks[j.id] = task
+			return nil
+		default:
+			// Wait releases mu so a worker can take work or Shutdown can close the pool.
+			s.space.Wait()
+		}
+	}
+}
+
+// Process preserves the synchronous Checkpoint 1 API using the same pool as Submit.
 func (s *TaskService) Process(id int) (Task, error) {
-	task, err := s.Get(id)
-	if err != nil {
+	done := make(chan error, 1)
+	if err := s.enqueue(job{id: id, done: done}); err != nil {
 		return Task{}, err
 	}
-
-	if task.Status != StatusPending {
-		return Task{}, ErrInvalidTaskState
-	}
-
-	task.Status = StatusProcessing
-	s.tasks[id] = task
-
-	result, err := s.processor.Process(task.Input)
-	if err != nil {
-		task.Status = StatusPending
-		s.tasks[id] = task
+	if err := <-done; err != nil {
 		return Task{}, err
 	}
-
-	task.Result = &result
-	task.Status = StatusCompleted
-	s.tasks[id] = task
-
 	return s.Get(id)
+}
+
+func (s *TaskService) work() {
+	for j := range s.queue {
+		s.mu.Lock()
+		s.space.Broadcast()
+		task := s.tasks[j.id]
+		task.Status = StatusProcessing
+		s.tasks[j.id] = task
+		s.mu.Unlock()
+
+		result, err := s.processor.Process(task.Input)
+		if err != nil {
+			task.Status = StatusPending
+			task.LastError = err.Error()
+		} else {
+			task.Status = StatusCompleted
+			task.Result = &result
+		}
+
+		s.mu.Lock()
+		s.tasks[j.id] = task
+		s.mu.Unlock()
+		if j.done != nil {
+			j.done <- err
+		}
+	}
+}
+
+func (s *TaskService) Shutdown() {
+	s.mu.Lock()
+	if !s.stopped {
+		s.stopped = true
+		close(s.queue)
+		s.space.Broadcast()
+	}
+	s.mu.Unlock()
+	s.workers.Wait()
 }

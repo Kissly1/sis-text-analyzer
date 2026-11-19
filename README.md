@@ -1,102 +1,63 @@
 # SIS Text Analyzer
 
-An individual project for SIS Checkpoint 1 of the Golang Application Development course.
-
-The application creates text-analysis tasks, stores them in memory, processes them synchronously, and saves their results.
-
-## Requirements
-
-- Go 1.27 or later.
-- No external dependencies.
+SIS Checkpoint 2 extends the Checkpoint 1 text analyzer with concurrent processing. Each command-line argument creates one task. The analyzer counts whitespace-separated words with `strings.Fields` and Unicode code points with `utf8.RuneCountInString`. Punctuation stays in its word. Spaces and newlines count as characters. Whitespace-only input is an error.
 
 ## Run
 
-Run the commands from the project directory.
-
-Start with two example texts:
+Use Go 1.27 or later. All dependencies belong to the standard library. Run these commands from the directory containing `go.mod`.
 
 ```bash
 go run .
+go run . "Hello Go" "Привет мир"
 ```
 
-Analyze your own text:
-
-```bash
-go run . "Hello Go"
-```
-
-Create and process multiple independent tasks:
-
-```bash
-go run . "Hello Go world" "Привет мир"
-```
-
-Each command-line argument is treated as one task. Use quotation marks to pass a text containing spaces.
-
-Example output for `go run . "Hello Go"`:
+The first command runs two sample tasks. The second prints:
 
 ```text
-Created task 1: pending
 Task 1: completed | words=2 | characters=8
+Task 2: completed | words=2 | characters=10
 ```
 
-Empty or whitespace-only input is rejected:
+The CLI submits each valid task and waits for the workers before printing results in input order. Workers can finish in either order. Invalid input produces a diagnostic and a nonzero exit code. On this error path, shutdown still drains work accepted earlier.
 
-```bash
-go run . "   "
-```
+## Tasks and workers
 
-The application prints an error and exits with a nonzero status.
+1. `NewTaskService(TextAnalyzer{})` starts **2 reusable workers** reading a shared buffered channel with **4 waiting slots**. Workers retain their slots in the pool between tasks.
+2. `Create(text)` validates the text, assigns a unique ID and stores a pending task in memory. `Submit(id)` queues an existing task and returns as soon as the pool accepts it. Call `Get(id)` to inspect a snapshot while workers run. The original synchronous `Process(id)` submits to the same pool and waits for that attempt.
+3. If both workers are busy and the queue is full, the submitting caller waits for space. The task stays pending until accepted. A condition variable releases the service lock while the caller waits. A worker taking a job wakes waiting callers, which check the service and task state again before sending.
+4. `Shutdown()` stops admission, closes the queue and wakes blocked submitters with `ErrStopped`. Workers drain all accepted jobs, including buffered ones, and exit. Every shutdown caller waits for the same worker group. Stored results remain readable until the process exits.
 
-## Analysis Rules
+| Event | Transition or outcome |
+| --- | --- |
+| Create and submit | `pending → queued` |
+| A worker takes the job | `queued → processing` |
+| Analysis succeeds | `processing → completed`; store this task's result |
+| Analysis returns an error | `processing → pending`; keep the error in `LastError` for inspection. A later submission retries the task and clears the error. |
+| Submit a queued, processing or completed task | `ErrInvalidTaskState` |
+| Submit an unknown ID while running, or retrieve an unknown ID | `ErrTaskNotFound` |
+| Submit after shutdown starts | `ErrStopped` |
 
-- Words are separated by whitespace using `strings.Fields`.
-- Punctuation remains part of a word.
-- Characters are counted as Unicode code points using `utf8.RuneCountInString`.
-- Spaces and line breaks are included in the character count.
-- Some compound emoji contain multiple Unicode code points.
+## Why concurrent access is safe
 
-## Task Model and Lifecycle
+The service's `sync.RWMutex` protects the ID counter, task map and shutdown flag. A submitter holds its write lock while checking the status, sending to the queue and recording the queued state. Two callers cannot both claim the same pending task. Shutdown closes the channel under this same lock, so it cannot close during a send.
 
-Each task contains a unique integer ID, input text, status, and an optional analysis result.
+A worker records the processing state under the lock, releases it while analyzing the text, and takes it again to publish the result and final state together. This lets other workers analyze independent texts and callers read tasks at the same time. `Get` takes a read lock and copies the result so a caller cannot mutate the stored value. Shutdown releases the lock before waiting on the `sync.WaitGroup`, letting workers finish their writes.
 
-Successful processing follows these transitions:
+## Files and verification
 
-```text
-Pending -> Processing -> Completed
-```
-
-A new task starts as Pending and has no result.
-
-Only Pending tasks can be processed. If processing returns an error, the task returns from Processing to Pending, allowing another attempt.
-
-Completed tasks cannot be processed again. Retrieving or processing an unknown ID returns an error.
-
-Tasks and results are stored in memory. IDs are unique within one service instance. Data is cleared when the application exits.
-
-## Project Structure
-
-- `task.go`: task statuses and data structures.
-- `analyzer.go`: input validation and text analysis.
-- `service.go`: in-memory storage, ID assignment, retrieval, and task lifecycle.
-- `main.go`: command-line entry point.
-- `analyzer_test.go`: table-driven tests for analysis and invalid input.
-- `service_test.go`: tests for creation, retrieval, processing, errors, and independent tasks.
-
-The service uses the Processor interface to call the text analyzer.
-
-## Tests and Checks
+`main.go` contains the CLI, `analyzer.go` the text rules, `task.go` the data model and `service.go` the queue, workers and in-memory store. The original analyzer and service tests cover Checkpoint 1 behavior. `pool_test.go` exercises overlap, queue pressure, duplicate submissions, concurrent readers and writers, retries and shutdown.
 
 ```bash
 gofmt -l .
 go vet ./...
 go test ./...
+go test -race ./...
 ```
 
-For detailed test output:
+The formatting check should print nothing. To watch the capacity and shutdown test specifically, run:
 
 ```bash
-go test -v ./...
+go test -v -run TestPoolCapacityAndShutdown
 ```
 
-Tests cover task creation, input validation, retrieval, unknown IDs, processing results, completed status, invalid operations, unique IDs, and independent tasks.
+The test holds two workers inside the processor using a channel. With both tasks still processing, it fills all four waiting slots and verifies that the next submission blocks. It then checks both ways the wait can end: a worker frees a slot, or shutdown rejects the waiting submission and drains the six accepted tasks. The test coordinates goroutines with channels and `testing/synctest`.

@@ -4,6 +4,7 @@ type TaskStatus string
 
 const (
 	StatusPending    TaskStatus = "pending"
+	StatusQueued     TaskStatus = "queued"
 	StatusProcessing TaskStatus = "processing"
 	StatusCompleted  TaskStatus = "completed"
 )
@@ -14,8 +15,9 @@ type AnalysisResult struct {
 }
 
 type Task struct {
-	ID     int
-	Input  string
-	Status TaskStatus
-	Result *AnalysisResult
+	ID        int
+	Input     string
+	Status    TaskStatus
+	Result    *AnalysisResult
+	LastError string
 }

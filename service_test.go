@@ -7,6 +7,7 @@ import (
 
 func TestTaskServiceCreateAndGet(t *testing.T) {
 	service := NewTaskService(TextAnalyzer{})
+	t.Cleanup(service.Shutdown)
 	text := "Hello Go"
 
 	created, err := service.Create(text)
@@ -41,6 +42,7 @@ func TestTaskServiceCreateInvalidInput(t *testing.T) {
 
 	for _, input := range inputs {
 		service := NewTaskService(TextAnalyzer{})
+		t.Cleanup(service.Shutdown)
 
 		_, err := service.Create(input)
 		if !errors.Is(err, ErrEmptyText) {
@@ -56,6 +58,7 @@ func TestTaskServiceCreateInvalidInput(t *testing.T) {
 
 func TestTaskServiceGetNotFound(t *testing.T) {
 	service := NewTaskService(TextAnalyzer{})
+	t.Cleanup(service.Shutdown)
 
 	_, err := service.Get(999)
 	if !errors.Is(err, ErrTaskNotFound) {
@@ -65,6 +68,7 @@ func TestTaskServiceGetNotFound(t *testing.T) {
 
 func TestTaskServiceProcess(t *testing.T) {
 	service := NewTaskService(TextAnalyzer{})
+	t.Cleanup(service.Shutdown)
 
 	task, err := service.Create("Hello Go")
 	if err != nil {
@@ -115,6 +119,7 @@ func TestTaskServiceProcess(t *testing.T) {
 
 func TestTaskServiceIndependentTasks(t *testing.T) {
 	service := NewTaskService(TextAnalyzer{})
+	t.Cleanup(service.Shutdown)
 
 	first, err := service.Create("Hello Go")
 	if err != nil {
