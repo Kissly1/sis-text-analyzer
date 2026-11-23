@@ -68,10 +68,14 @@ func TestPoolCapacityAndShutdown(t *testing.T) {
 					accepted = append(accepted, task)
 				}
 
-				// Both workers are busy and the buffer is full, so this submission must wait.
+				// A rejected job stays pending and can be submitted again.
 				extra := createTask(t, s, "ещё один текст")
+				if err := s.Submit(extra.ID); !errors.Is(err, ErrQueueFull) {
+					t.Fatalf("full queue: %v", err)
+				}
+				checkState(t, s, extra.ID, StatusPending)
 				submitted := make(chan error, 1)
-				go func() { submitted <- s.Submit(extra.ID) }()
+				go func() { submitted <- s.SubmitWait(extra.ID) }()
 				synctest.Wait()
 				select {
 				case err := <-submitted:
@@ -137,7 +141,7 @@ func TestConcurrentClients(t *testing.T) {
 				return
 			}
 			ids <- task.ID
-			if err := s.Submit(task.ID); err != nil {
+			if err := s.SubmitWait(task.ID); err != nil {
 				t.Error(err)
 				return
 			}
@@ -218,7 +222,7 @@ func TestAnalysisFailureCanBeRetried(t *testing.T) {
 	if _, err := s.Process(task.ID); !errors.Is(err, failure) {
 		t.Fatalf("first attempt returned %v", err)
 	}
-	if got := checkState(t, s, task.ID, StatusPending); got.LastError != failure.Error() {
+	if got := checkState(t, s, task.ID, StatusFailed); got.LastError != failure.Error() {
 		t.Fatalf("failure was not recorded: %+v", got)
 	}
 	if err := s.Submit(task.ID); err != nil {
@@ -228,5 +232,44 @@ func TestAnalysisFailureCanBeRetried(t *testing.T) {
 	got := checkState(t, s, task.ID, StatusCompleted)
 	if got.LastError != "" || got.Result == nil || *got.Result != (AnalysisResult{2, 9}) {
 		t.Fatalf("unexpected retry result: %+v", got)
+	}
+}
+
+func TestSubmitRacesWithShutdown(t *testing.T) {
+	s := NewTaskService(TextAnalyzer{})
+	defer s.Shutdown()
+	type attempt struct {
+		id  int
+		err error
+	}
+	const count = 32
+	results := make(chan attempt, count)
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for i := range count {
+		task := createTask(t, s, fmt.Sprintf("task %d", i))
+		group.Go(func() {
+			<-start
+			results <- attempt{task.ID, s.Submit(task.ID)}
+		})
+	}
+	for range 2 {
+		group.Go(func() {
+			<-start
+			s.Shutdown()
+		})
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	for result := range results {
+		switch {
+		case result.err == nil:
+			checkState(t, s, result.id, StatusCompleted)
+		case errors.Is(result.err, ErrStopped), errors.Is(result.err, ErrQueueFull):
+			checkState(t, s, result.id, StatusPending)
+		default:
+			t.Fatalf("task %d: %v", result.id, result.err)
+		}
 	}
 }

@@ -7,6 +7,7 @@ const (
 	StatusQueued     TaskStatus = "queued" // Accepted for processing and waiting for a worker.
 	StatusProcessing TaskStatus = "processing"
 	StatusCompleted  TaskStatus = "completed"
+	StatusFailed     TaskStatus = "failed" // The error is retained until a retry is accepted.
 )
 
 type AnalysisResult struct {

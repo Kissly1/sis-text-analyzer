@@ -18,13 +18,13 @@ Task 1: completed | words=2 | characters=8
 Task 2: completed | words=2 | characters=10
 ```
 
-The CLI submits each valid task and waits for the workers before printing results in input order. Workers can finish in either order. Invalid input produces a diagnostic and a nonzero exit code. On this error path, shutdown still drains work accepted earlier.
+The CLI uses `SubmitWait` to submit each valid task and waits for the workers before printing results in input order. Workers can finish in either order. Invalid input produces a diagnostic and a nonzero exit code. On this error path, shutdown still drains work accepted earlier.
 
 ## Tasks and workers
 
 1. `NewTaskService(TextAnalyzer{})` starts **2 reusable workers** reading a shared buffered channel with **4 waiting slots**. Workers retain their slots in the pool between tasks.
 2. `Create(text)` validates the text, assigns a unique ID and stores a pending task in memory. `Submit(id)` queues an existing task and returns as soon as the pool accepts it. Call `Get(id)` to inspect a snapshot while workers run. The original synchronous `Process(id)` submits to the same pool and waits for that attempt.
-3. If both workers are busy and the queue is full, the submitting caller waits for space. The task stays pending until accepted. A condition variable releases the service lock while the caller waits. A worker taking a job wakes waiting callers, which check the service and task state again before sending.
+3. A full queue makes `Submit` return `ErrQueueFull` immediately. A new task stays pending and can be submitted again. The CLI uses `SubmitWait` to wait for space when processing a batch. A condition variable releases the service lock while the caller waits. A worker taking a job wakes waiting callers, which check the service and task state again before sending.
 4. `Shutdown()` stops admission, closes the queue and wakes blocked submitters with `ErrStopped`. Workers drain all accepted jobs, including buffered ones, and exit. Every shutdown caller waits for the same worker group. Stored results remain readable until the process exits.
 
 | Event | Transition or outcome |
@@ -32,10 +32,20 @@ The CLI submits each valid task and waits for the workers before printing result
 | Create and submit | `pending → queued` |
 | A worker takes the job | `queued → processing` |
 | Analysis succeeds | `processing → completed`; store this task's result |
-| Analysis returns an error | `processing → pending`; keep the error in `LastError` for inspection. A later submission retries the task and clears the error. |
+| Analysis returns an error | `processing → failed`; keep the error in `LastError` for inspection. An accepted retry moves it to queued and clears the error. A rejected retry keeps the error. |
 | Submit a queued, processing or completed task | `ErrInvalidTaskState` |
 | Submit an unknown ID while running, or retrieve an unknown ID | `ErrTaskNotFound` |
 | Submit after shutdown starts | `ErrStopped` |
+
+```mermaid
+flowchart TD
+    C["Caller"] --> Q["Queue: 4 waiting jobs"]
+    Q --> W1["Worker 1"]
+    Q --> W2["Worker 2"]
+    W1 --> S["Task map: results by ID"]
+    W2 --> S
+    C -->|Get| S
+```
 
 ## Why concurrent access is safe
 
@@ -60,4 +70,4 @@ The formatting check should print nothing. To watch the capacity and shutdown te
 go test -v -run TestPoolCapacityAndShutdown
 ```
 
-The test holds two workers inside the processor using a channel. With both tasks still processing, it fills all four waiting slots and verifies that the next submission blocks. It then checks both ways the wait can end: a worker frees a slot, or shutdown rejects the waiting submission and drains the six accepted tasks. The test coordinates goroutines with channels and `testing/synctest`.
+The test holds two workers inside the processor using a channel. With both tasks still processing, it fills all four waiting slots and verifies that Submit returns ErrQueueFull and SubmitWait blocks. It then checks both ways the wait can end: a worker frees a slot, or shutdown rejects the waiting submission and drains the six accepted tasks. The test coordinates goroutines with channels and `testing/synctest`.

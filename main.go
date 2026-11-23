@@ -25,7 +25,7 @@ func run(texts []string) error {
 		if err != nil {
 			return fmt.Errorf("create task: %w", err)
 		}
-		if err := service.Submit(task.ID); err != nil {
+		if err := service.SubmitWait(task.ID); err != nil {
 			return fmt.Errorf("submit task %d: %w", task.ID, err)
 		}
 		ids = append(ids, task.ID)

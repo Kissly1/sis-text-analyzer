@@ -12,7 +12,8 @@ const (
 
 var (
 	ErrTaskNotFound     = errors.New("task not found")
-	ErrInvalidTaskState = errors.New("task must be pending")
+	ErrInvalidTaskState = errors.New("task must be pending or failed")
+	ErrQueueFull        = errors.New("task queue is full")
 	ErrStopped          = errors.New("task service has stopped")
 )
 
@@ -81,13 +82,18 @@ func (s *TaskService) Get(id int) (Task, error) {
 	return task, nil
 }
 
-// Submit waits only for a queue slot. Workers analyze accepted tasks independently.
+// Submit accepts work immediately or returns ErrQueueFull without changing the task.
 func (s *TaskService) Submit(id int) error {
-	return s.enqueue(job{id: id})
+	return s.enqueue(job{id: id}, false)
+}
+
+// SubmitWait lets batch callers wait for space while workers process earlier inputs.
+func (s *TaskService) SubmitWait(id int) error {
+	return s.enqueue(job{id: id}, true)
 }
 
 // Hold the same lock through the state check and send so only one caller can queue a task.
-func (s *TaskService) enqueue(j job) error {
+func (s *TaskService) enqueue(j job, waitForSpace bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
@@ -98,7 +104,7 @@ func (s *TaskService) enqueue(j job) error {
 		if !ok {
 			return ErrTaskNotFound
 		}
-		if task.Status != StatusPending {
+		if task.Status != StatusPending && task.Status != StatusFailed {
 			return ErrInvalidTaskState
 		}
 		select {
@@ -108,6 +114,9 @@ func (s *TaskService) enqueue(j job) error {
 			s.tasks[j.id] = task
 			return nil
 		default:
+			if !waitForSpace {
+				return ErrQueueFull
+			}
 			// Wait releases mu. After waking, recheck: another sender may have taken the slot.
 			s.space.Wait()
 		}
@@ -117,7 +126,7 @@ func (s *TaskService) enqueue(j job) error {
 // Process preserves the synchronous Checkpoint 1 API using the same pool as Submit.
 func (s *TaskService) Process(id int) (Task, error) {
 	done := make(chan error, 1)
-	if err := s.enqueue(job{id: id, done: done}); err != nil {
+	if err := s.enqueue(job{id: id, done: done}, true); err != nil {
 		return Task{}, err
 	}
 	if err := <-done; err != nil {
@@ -138,7 +147,7 @@ func (s *TaskService) work() {
 		// Analyze outside the lock so the other worker and readers can keep running.
 		result, err := s.processor.Process(task.Input)
 		if err != nil {
-			task.Status = StatusPending
+			task.Status = StatusFailed
 			task.LastError = err.Error()
 		} else {
 			task.Status = StatusCompleted
