@@ -7,7 +7,7 @@ import (
 
 func TestTaskServiceCreateAndGet(t *testing.T) {
 	service := NewTaskService(TextAnalyzer{})
-	t.Cleanup(service.Shutdown)
+	t.Cleanup(service.Shutdown) // Each service now starts workers that the test must stop.
 	text := "Hello Go"
 
 	created, err := service.Create(text)

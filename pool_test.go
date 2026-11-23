@@ -68,6 +68,7 @@ func TestPoolCapacityAndShutdown(t *testing.T) {
 					accepted = append(accepted, task)
 				}
 
+				// Both workers are busy and the buffer is full, so this submission must wait.
 				extra := createTask(t, s, "ещё один текст")
 				submitted := make(chan error, 1)
 				go func() { submitted <- s.Submit(extra.ID) }()
@@ -160,6 +161,7 @@ func TestConcurrentClients(t *testing.T) {
 		if task.Result == nil || *task.Result != want {
 			t.Fatalf("task %d: unexpected result %v", id, task.Result)
 		}
+		// Changing a snapshot must leave the stored result intact.
 		task.Result.WordCount = -1
 		again, _ := s.Get(id)
 		if *again.Result != want {
@@ -193,6 +195,7 @@ func TestConcurrentDuplicateSubmit(t *testing.T) {
 			}
 		})
 	}
+	// Release all callers together to compete for the same pending task.
 	close(start)
 	group.Wait()
 	s.Shutdown()

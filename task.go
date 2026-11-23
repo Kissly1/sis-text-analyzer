@@ -4,7 +4,7 @@ type TaskStatus string
 
 const (
 	StatusPending    TaskStatus = "pending"
-	StatusQueued     TaskStatus = "queued"
+	StatusQueued     TaskStatus = "queued" // Accepted for processing and waiting for a worker.
 	StatusProcessing TaskStatus = "processing"
 	StatusCompleted  TaskStatus = "completed"
 )
@@ -19,5 +19,5 @@ type Task struct {
 	Input     string
 	Status    TaskStatus
 	Result    *AnalysisResult
-	LastError string
+	LastError string // Keeps the last processing error until the next submission.
 }

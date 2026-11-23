@@ -17,7 +17,7 @@ func run(texts []string) error {
 		texts = []string{"Hello Go world", "Привет мир"}
 	}
 	service := NewTaskService(TextAnalyzer{})
-	defer service.Shutdown()
+	defer service.Shutdown() // Drain accepted jobs even if a later input is invalid.
 
 	ids := make([]int, 0, len(texts))
 	for _, text := range texts {
@@ -31,6 +31,7 @@ func run(texts []string) error {
 		ids = append(ids, task.ID)
 	}
 
+	// Wait for every result, then print in input order even if workers finished out of order.
 	service.Shutdown()
 	for _, id := range ids {
 		task, err := service.Get(id)

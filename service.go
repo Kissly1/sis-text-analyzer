@@ -7,7 +7,7 @@ import (
 
 const (
 	workerCount   = 2
-	queueCapacity = 4
+	queueCapacity = 4 // Counts waiting jobs; each worker can also hold one active job.
 )
 
 var (
@@ -27,7 +27,7 @@ type job struct {
 }
 
 type TaskService struct {
-	mu        sync.RWMutex
+	mu        sync.RWMutex // Protects task records, ID allocation, and the shutdown flag.
 	tasks     map[int]Task
 	nextID    int
 	processor Processor
@@ -45,6 +45,7 @@ func NewTaskService(processor Processor) *TaskService {
 		queue:     make(chan job, queueCapacity),
 	}
 	s.space = sync.NewCond(&s.mu)
+	// Start the workers once. Each serves the same queue until it is drained.
 	for range workerCount {
 		s.workers.Go(s.work)
 	}
@@ -85,6 +86,7 @@ func (s *TaskService) Submit(id int) error {
 	return s.enqueue(job{id: id})
 }
 
+// Hold the same lock through the state check and send so only one caller can queue a task.
 func (s *TaskService) enqueue(j job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,7 +108,7 @@ func (s *TaskService) enqueue(j job) error {
 			s.tasks[j.id] = task
 			return nil
 		default:
-			// Wait releases mu so a worker can take work or Shutdown can close the pool.
+			// Wait releases mu. After waking, recheck: another sender may have taken the slot.
 			s.space.Wait()
 		}
 	}
@@ -133,6 +135,7 @@ func (s *TaskService) work() {
 		s.tasks[j.id] = task
 		s.mu.Unlock()
 
+		// Analyze outside the lock so the other worker and readers can keep running.
 		result, err := s.processor.Process(task.Input)
 		if err != nil {
 			task.Status = StatusPending
@@ -155,9 +158,11 @@ func (s *TaskService) Shutdown() {
 	s.mu.Lock()
 	if !s.stopped {
 		s.stopped = true
+		// Workers can still receive jobs already in the buffer after close.
 		close(s.queue)
 		s.space.Broadcast()
 	}
 	s.mu.Unlock()
+	// Workers need mu to store their final results, so wait after unlocking.
 	s.workers.Wait()
 }
